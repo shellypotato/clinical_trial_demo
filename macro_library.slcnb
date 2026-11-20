@@ -1,0 +1,101 @@
+{
+  "cells": [
+    {
+      "kind": 2,
+      "language": "slc.sasLanguage",
+      "value": "proc print data=sashelp.class(obs=5);\r\nrun;\r\n\r\nproc contents data=sashelp.class varnum;\r\nrun;\r\n",
+      "executionSummary": {
+        "timing": {
+          "startTime": 1794589521339,
+          "endTime": 1794589521339
+        },
+        "executionOrder": 4,
+        "success": true
+      },
+      "metadata": {},
+      "outputs": [
+        {
+          "items": [
+            {
+              "data": "WwoJewoJCSJ0ZXh0IjogIkVSUk9SOiBUaGVyZSBpcyBubyBhY3RpdmUgc2Vzc2lvbiIsCgkJInR5cGUiOiA2Cgl9Cl0=",
+              "mime": "application/vnd.altair.slc.loglines"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": 2,
+      "language": "slc.sasLanguage",
+      "value": "",
+      "executionSummary": {
+        "timing": {
+          "startTime": 1794589521356,
+          "endTime": 1794589521356
+        },
+        "executionOrder": 5,
+        "success": true
+      },
+      "metadata": {},
+      "outputs": [
+        {
+          "items": [
+            {
+              "data": "WwoJewoJCSJ0ZXh0IjogIkVSUk9SOiBUaGVyZSBpcyBubyBhY3RpdmUgc2Vzc2lvbiIsCgkJInR5cGUiOiA2Cgl9Cl0=",
+              "mime": "application/vnd.altair.slc.loglines"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": 1,
+      "language": "markdown",
+      "value": "# EZPill CRO Macro Library\n\nOriginal educational implementations of common clinical programming patterns: key validation, baseline descriptive statistics, baseline-adjusted change derivations, visit summaries, adverse-event incidence, and disposition summaries. These are not copied from a proprietary CRO library and have not undergone production validation.\n\n## Data Contract\n\nLoad the Python-generated tables into SLC as SAS datasets named `work.subjects`, `work.labs`, `work.adverse_events`, and `work.disposition`, retaining their original column names. Python objects are not automatically available in SLC. `study_id` and `subject_id` are character identifiers; lipid values and `visit_week` are numeric. Long source column names must be preserved by your transfer method. This library does not import files or overwrite source tables.\n\n## Macro Catalog\n\n| Macro | Purpose |\n| --- | --- |\n| `%cro_keycheck` | Reject missing or duplicate key values; sets `cro_ok` to 0 or 1 |\n| `%cro_baseline` | Continuous baseline summaries and categorical frequency tables by treatment and LDL stratum |\n| `%cro_ldl_derive` | Link visits to randomized subjects and derive LDL-C change and percentage change |\n| `%cro_ldl_summary` | Observed-case LDL-C summaries by treatment, stratum, and scheduled week |\n| `%cro_ae_incidence` | Reported adverse-event counts and distinct participants affected, with randomized denominators |\n| `%cro_disposition` | Completion and discontinuation counts with randomized denominators |\n\n## Analysis Conventions\n\nThe subject-table `baseline_ldl_c_mg_dl` is the authoritative baseline. The simulator generates a separate noisy Week 0 LDL value, so Week 0 is excluded from change analyses. Missing outcomes remain missing; no LOCF or other imputation is applied. Visit summaries include all scheduled records and separately report observed and missing LDL values. Elevated and normal LDL strata are reported separately.\n\nAll randomized participants are included, assuming the subject table contains only randomized participants. This is not a verified safety population. Adverse events are reported events, not treatment-emergent events: exposure dates and an approved risk window are unavailable. Events are not MedDRA coded. Overall AE totals are calculated separately rather than by adding term-level participant counts. No confirmatory hypothesis testing, estimand, multiplicity strategy, or submission-ready SDTM/ADaM derivation is supplied.\n\nMacro outputs use explicit caller-controlled names. Rerunning a macro replaces its named output datasets. Review the SLC log and independently validate the library against a statistical analysis plan before any regulated use.",
+      "executionSummary": {},
+      "metadata": {},
+      "outputs": []
+    },
+    {
+      "kind": 2,
+      "language": "slc.sasLanguage",
+      "value": "%macro cro_keycheck(data=, keys=study_id subject_id);\n    %global cro_ok;\n    %local handle result index variable bad_groups group_keys missing_test;\n    %let cro_ok=0;\n    %let handle=%sysfunc(open(&data,i));\n    %if &handle=0 %then %do;\n        %put ERROR: CRO cannot open &data.;\n        %return;\n    %end;\n    %let group_keys=;\n    %let missing_test=;\n    %do index=1 %to %sysfunc(countw(&keys));\n        %let variable=%scan(&keys,&index);\n        %if %sysfunc(varnum(&handle,&variable))=0 %then %do;\n            %let result=%sysfunc(close(&handle));\n            %put ERROR: CRO missing key variable &variable in &data.;\n            %return;\n        %end;\n        %if &index>1 %then %do;\n            %let group_keys=&group_keys,;\n            %let missing_test=&missing_test or;\n        %end;\n        %let group_keys=&group_keys &variable;\n        %let missing_test=&missing_test missing(&variable);\n    %end;\n    %let result=%sysfunc(close(&handle));\n    proc sql noprint;\n        select count(*) into :bad_groups trimmed\n        from (\n            select &group_keys, count(*) as key_count\n            from &data\n            group by &group_keys\n            having count(*)>1 or &missing_test\n        ) as invalid_keys;\n    quit;\n    %if &sqlrc ne 0 %then %return;\n    %if &bad_groups>0 %then %do;\n        %put ERROR: CRO found &bad_groups invalid key groups in &data.;\n        %return;\n    %end;\n    %let cro_ok=1;\n%mend;\n\n%macro cro_baseline(subjects=work.subjects, out=work.cro_base);\n    %cro_keycheck(data=&subjects);\n    %if &cro_ok=0 %then %return;\n    proc means data=&subjects nway noprint;\n        class treatment_arm baseline_ldl_stratum;\n        var age_years bmi_kg_m2 baseline_ldl_c_mg_dl;\n        output out=&out._continuous n= mean= std= median= min= max= / autoname;\n    run;\n    proc freq data=&subjects noprint;\n        tables treatment_arm*baseline_ldl_stratum*sex / missing out=&out._sex;\n        tables treatment_arm*baseline_ldl_stratum*diabetes_history / missing out=&out._diabetes;\n    run;\n    proc sql;\n        create table &out._denom as\n        select treatment_arm, baseline_ldl_stratum, count(*) as randomized_n\n        from &subjects group by treatment_arm, baseline_ldl_stratum;\n        create table &out._sex_pct as\n        select source.*, denominator.randomized_n,\n               100*source.count/denominator.randomized_n as within_group_pct\n        from &out._sex as source inner join &out._denom as denominator\n        on source.treatment_arm=denominator.treatment_arm\n        and source.baseline_ldl_stratum=denominator.baseline_ldl_stratum;\n        create table &out._diabetes_pct as\n        select source.*, denominator.randomized_n,\n               100*source.count/denominator.randomized_n as within_group_pct\n        from &out._diabetes as source inner join &out._denom as denominator\n        on source.treatment_arm=denominator.treatment_arm\n        and source.baseline_ldl_stratum=denominator.baseline_ldl_stratum;\n    quit;\n%mend;\n\n%macro cro_ldl_derive(subjects=work.subjects, labs=work.labs, out=work.cro_ldl);\n    %local orphan_n;\n    %cro_keycheck(data=&subjects);\n    %if &cro_ok=0 %then %return;\n    %cro_keycheck(data=&labs, keys=study_id subject_id visit_week);\n    %if &cro_ok=0 %then %return;\n    proc sql noprint;\n        select count(*) into :orphan_n trimmed\n        from &labs as visits left join &subjects as participants\n        on visits.study_id=participants.study_id\n        and visits.subject_id=participants.subject_id\n        where missing(participants.subject_id);\n    quit;\n    %if &sqlrc ne 0 %then %return;\n    %if &orphan_n>0 %then %do;\n        %put ERROR: CRO lab records have unmatched subject identifiers.;\n        %return;\n    %end;\n    proc sql;\n        create table &out as\n        select visits.*, participants.treatment_arm,\n               participants.baseline_ldl_stratum,\n               participants.baseline_ldl_c_mg_dl as base,\n               case when visits.visit_week>0\n                    and visits.visit_status='Completed'\n                    then visits.ldl_c_mg_dl else . end as aval,\n               case when visits.visit_week>0\n                    and visits.visit_status='Completed'\n                    and not missing(visits.ldl_c_mg_dl)\n                    and not missing(participants.baseline_ldl_c_mg_dl)\n                    then visits.ldl_c_mg_dl-participants.baseline_ldl_c_mg_dl\n                    else . end as chg,\n               case when visits.visit_week>0\n                    and visits.visit_status='Completed'\n                    and not missing(visits.ldl_c_mg_dl)\n                    and participants.baseline_ldl_c_mg_dl>0\n                    then 100*(visits.ldl_c_mg_dl-participants.baseline_ldl_c_mg_dl)\n                         /participants.baseline_ldl_c_mg_dl\n                    else . end as pchg\n        from &labs as visits inner join &subjects as participants\n        on visits.study_id=participants.study_id\n        and visits.subject_id=participants.subject_id;\n    quit;\n%mend;\n\n%macro cro_ldl_summary(data=work.cro_ldl, out=work.cro_ldl_stats);\n    %cro_keycheck(data=&data, keys=study_id subject_id visit_week);\n    %if &cro_ok=0 %then %return;\n    proc means data=&data nway noprint;\n        where visit_week>0;\n        class treatment_arm baseline_ldl_stratum visit_week;\n        var aval chg pchg;\n        output out=&out n= nmiss= mean= std= median= min= max= / autoname;\n    run;\n%mend;\n\n%macro cro_ae_incidence(subjects=work.subjects, ae=work.adverse_events, out=work.cro_ae);\n    %local orphan_n;\n    %cro_keycheck(data=&subjects);\n    %if &cro_ok=0 %then %return;\n    %cro_keycheck(data=&ae, keys=study_id subject_id ae_sequence);\n    %if &cro_ok=0 %then %return;\n    proc sql noprint;\n        select count(*) into :orphan_n trimmed\n        from &ae as events left join &subjects as participants\n        on events.study_id=participants.study_id\n        and events.subject_id=participants.subject_id\n        where missing(participants.subject_id);\n    quit;\n    %if &sqlrc ne 0 %then %return;\n    %if &orphan_n>0 %then %do;\n        %put ERROR: CRO AE records have unmatched subject identifiers.;\n        %return;\n    %end;\n    proc sql;\n        create table &out._denom as\n        select treatment_arm, baseline_ldl_stratum, count(*) as randomized_n\n        from &subjects group by treatment_arm, baseline_ldl_stratum;\n        create table &out._counts as\n        select participants.treatment_arm, participants.baseline_ldl_stratum,\n               'TERM' as row_type length=8, events.ae_term as category length=200,\n               count(distinct participants.subject_id) as affected_n,\n               count(*) as event_n\n        from &subjects as participants inner join &ae as events\n        on participants.study_id=events.study_id\n        and participants.subject_id=events.subject_id\n        group by participants.treatment_arm, participants.baseline_ldl_stratum, events.ae_term\n        union all\n        select participants.treatment_arm, participants.baseline_ldl_stratum,\n               'OVERALL', 'Any reported adverse event',\n               count(distinct participants.subject_id), count(*)\n        from &subjects as participants inner join &ae as events\n        on participants.study_id=events.study_id\n        and participants.subject_id=events.subject_id\n        group by participants.treatment_arm, participants.baseline_ldl_stratum;\n        create table &out._categories as\n        select distinct row_type, category from &out._counts\n        union select 'OVERALL', 'Any reported adverse event' from &out._denom;\n        create table &out as\n        select denominator.treatment_arm, denominator.baseline_ldl_stratum,\n               categories.row_type, categories.category, denominator.randomized_n,\n               coalesce(counts.affected_n,0) as affected_n,\n               coalesce(counts.event_n,0) as event_n,\n               100*coalesce(counts.affected_n,0)/denominator.randomized_n as affected_pct\n        from &out._denom as denominator cross join &out._categories as categories\n        left join &out._counts as counts\n        on denominator.treatment_arm=counts.treatment_arm\n        and denominator.baseline_ldl_stratum=counts.baseline_ldl_stratum\n        and categories.row_type=counts.row_type and categories.category=counts.category;\n    quit;\n%mend;\n\n%macro cro_disposition(subjects=work.subjects, disposition=work.disposition, out=work.cro_disp);\n    %local orphan_n;\n    %cro_keycheck(data=&subjects);\n    %if &cro_ok=0 %then %return;\n    %cro_keycheck(data=&disposition);\n    %if &cro_ok=0 %then %return;\n    proc sql noprint;\n        select count(*) into :orphan_n trimmed\n        from &disposition as status left join &subjects as participants\n        on status.study_id=participants.study_id\n        and status.subject_id=participants.subject_id\n        where missing(participants.subject_id);\n    quit;\n    %if &sqlrc ne 0 %then %return;\n    %if &orphan_n>0 %then %do;\n        %put ERROR: CRO disposition records have unmatched subject identifiers.;\n        %return;\n    %end;\n    proc sql;\n        create table &out._denom as\n        select treatment_arm, baseline_ldl_stratum, count(*) as randomized_n\n        from &subjects group by treatment_arm, baseline_ldl_stratum;\n        create table &out._counts as\n        select participants.treatment_arm, participants.baseline_ldl_stratum,\n               coalescec(status.end_of_study_status,'Missing record/status') as status length=40,\n               coalescec(status.discontinuation_reason,'Not specified') as reason length=80,\n               count(*) as participant_n\n        from &subjects as participants left join &disposition as status\n        on participants.study_id=status.study_id\n        and participants.subject_id=status.subject_id\n        group by participants.treatment_arm, participants.baseline_ldl_stratum,\n                 calculated status, calculated reason;\n        create table &out as\n        select counts.*, denominator.randomized_n,\n               100*counts.participant_n/denominator.randomized_n as participant_pct\n        from &out._counts as counts inner join &out._denom as denominator\n        on counts.treatment_arm=denominator.treatment_arm\n        and counts.baseline_ldl_stratum=denominator.baseline_ldl_stratum;\n    quit;\n%mend;",
+      "executionSummary": {
+        "timing": {
+          "startTime": 1794600600939,
+          "endTime": 1794600600940
+        },
+        "executionOrder": 7,
+        "success": true
+      },
+      "metadata": {},
+      "outputs": [
+        {
+          "items": [
+            {
+              "data": "WwoJewoJCSJ0ZXh0IjogIkVSUk9SOiBUaGVyZSBpcyBubyBhY3RpdmUgc2Vzc2lvbiIsCgkJInR5cGUiOiA2Cgl9Cl0=",
+              "mime": "application/vnd.altair.slc.loglines"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": 1,
+      "language": "markdown",
+      "value": "## Running the Library\n\nStart an SLC session, then run the macro-definition cell. After loading the four source tables into SLC, run the example cell below to define `%cro_example`, then invoke `%cro_example;` in a new SLC cell. Defining the example alone does not run analyses.\n\nUse a single study per call. Required character variables include `treatment_arm`, `baseline_ldl_stratum`, `visit_status`, and the categorical source fields; numeric variables include `age_years`, `bmi_kg_m2`, `baseline_ldl_c_mg_dl`, `visit_week`, `ldl_c_mg_dl`, and `ae_sequence`. This library checks keys but does not implement full schema, date, or controlled-terminology validation. Keep output names different from input names, and do not interpret an old output after a failed rerun.\n\nFor baseline categorical results, use `cro_base_sex_pct` and `cro_base_diabetes_pct`: `within_group_pct` uses the randomized arm-by-stratum denominator, including missing categories. The raw PROC FREQ `PERCENT` column is a whole-table percentage, not that denominator. In continuous summaries, `_FREQ_` is the group record count; each variable has its own nonmissing `N`. LDL summaries report observed-case means, not model-adjusted treatment effects.\n\n**Validation status:** execution was attempted, but SLC returned \"There is no active session.\" The macros have not been compiled or behavior-tested in this environment. Before relying on results, independently test duplicate and missing keys, unmatched participants, missing baseline values, missed visits, zero-event groups, repeated events within a participant, and disposition denominator reconciliation.",
+      "executionSummary": {},
+      "metadata": {},
+      "outputs": []
+    },
+    {
+      "kind": 2,
+      "language": "slc.sasLanguage",
+      "value": "%macro cro_example;\n    %if not %sysfunc(exist(work.subjects)) or\n        not %sysfunc(exist(work.labs)) or\n        not %sysfunc(exist(work.adverse_events)) or\n        not %sysfunc(exist(work.disposition)) %then %do;\n        %put ERROR: Load the four EZPill source tables into SLC before running this example.;\n        %return;\n    %end;\n    %cro_baseline(subjects=work.subjects, out=work.cro_base);\n    %cro_ldl_derive(subjects=work.subjects, labs=work.labs, out=work.cro_ldl);\n    %if &cro_ok=0 %then %return;\n    %cro_ldl_summary(data=work.cro_ldl, out=work.cro_ldl_stats);\n    %cro_ae_incidence(subjects=work.subjects, ae=work.adverse_events, out=work.cro_ae);\n    %cro_disposition(subjects=work.subjects, disposition=work.disposition, out=work.cro_disp);\n    proc print data=work.cro_ldl_stats(obs=12);\n    run;\n    proc print data=work.cro_ae;\n        where row_type='OVERALL';\n    run;\n    proc print data=work.cro_disp;\n    run;\n%mend;",
+      "executionSummary": {},
+      "metadata": {},
+      "outputs": []
+    }
+  ],
+  "metadata": {}
+}
